@@ -1,4 +1,4 @@
-// swift-tools-version: 6.4
+// swift-tools-version: 6.1
 
 import Foundation
 import PackageDescription
@@ -60,11 +60,10 @@ let package = Package(
   ],
   dependencies: [
     .package(url: "https://github.com/apple/swift-collections", from: "1.0.0"),
-    .package(url: "https://github.com/groue/GRDB.swift", exact: "7.10.0"),
+    .package(url: "https://github.com/groue/GRDB.swift", from: "7.6.0"),
     .package(url: "https://github.com/pointfreeco/swift-concurrency-extras", from: "1.4.0"),
     .package(url: "https://github.com/pointfreeco/swift-custom-dump", from: "1.3.3"),
     .package(url: "https://github.com/pointfreeco/swift-dependencies", from: "1.9.0"),
-    .package(url: "https://github.com/pointfreeco/swift-issue-reporting", from: "2.1.0"),
     .package(url: "https://github.com/pointfreeco/swift-perception", from: "2.0.0"),
     .package(url: "https://github.com/pointfreeco/swift-sharing", from: "2.3.0"),
     .package(url: "https://github.com/pointfreeco/swift-snapshot-testing", from: "1.18.4"),
@@ -73,19 +72,11 @@ let package = Package(
       from: "0.39.1",
       traits: [
         .trait(name: "CasePaths", condition: .when(traits: ["CasePaths"])),
-        .trait(name: "ColumnCoding", condition: .when(traits: ["ColumnCoding"])),
-        .trait(
-          name: "LazyInitializableByDefault",
-          condition: .when(traits: ["LazyInitializableByDefault"])
-        ),
-        .trait(
-          name: "SuppressPlatformSQLiteAvailability",
-          condition: .when(traits: ["SuppressPlatformSQLiteAvailability"])
-        ),
         .trait(name: "Tagged", condition: .when(traits: ["Tagged"])),
       ]
     ),
     .package(url: "https://github.com/pointfreeco/swift-tagged", from: "0.10.0"),
+    .package(url: "https://github.com/pointfreeco/xctest-dynamic-overlay", from: "1.13.0"),
   ],
   targets: [
     .target(
@@ -94,7 +85,7 @@ let package = Package(
         .product(name: "ConcurrencyExtras", package: "swift-concurrency-extras"),
         .product(name: "Dependencies", package: "swift-dependencies"),
         .product(name: "GRDB", package: "GRDB.swift"),
-        .product(name: "IssueReporting", package: "swift-issue-reporting"),
+        .product(name: "IssueReporting", package: "xctest-dynamic-overlay"),
         .product(name: "OrderedCollections", package: "swift-collections"),
         .product(name: "Perception", package: "swift-perception"),
         .product(name: "Sharing", package: "swift-sharing"),
