@@ -175,6 +175,77 @@
           }
         }
 
+        // * Create list
+        // * Stop sync engine
+        // * Delete list, its pending change row lands while start is enqueueing pending changes
+        // * Start sync engine, restart it
+        // => Pending change is not dropped and list is deleted from CloudKit
+        @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+        @Test func pendingChangeWrittenDuringStartIsNotDropped() async throws {
+          try await userDatabase.userWrite { db in
+            try db.seed {
+              RemindersList(id: 1, title: "Personal")
+            }
+          }
+          try await syncEngine.processPendingRecordZoneChanges(scope: .private)
+
+          syncEngine.stop()
+
+          try await userDatabase.userWrite { db in
+            try RemindersList.find(1).delete().execute(db)
+          }
+
+          try await Task.sleep(for: .seconds(1))
+
+          let lateChanges = try await syncEngine.metadatabase.write { db in
+            let changes = try PendingRecordZoneChange
+              .select(\.pendingRecordZoneChange)
+              .fetchAll(db)
+            try PendingRecordZoneChange.delete().execute(db)
+            return changes
+          }
+          #expect(!lateChanges.isEmpty)
+
+          try await $_didEnqueueLocallyPendingChanges.withValue(
+            { [userDatabase] in
+              try await userDatabase.write { db in
+                try PendingRecordZoneChange
+                  .insert { lateChanges.map { PendingRecordZoneChange($0) } }
+                  .execute(db)
+              }
+            }
+          ) {
+            try await syncEngine.start()
+          }
+
+          let pendingChanges = try await syncEngine.metadatabase.read { db in
+            try PendingRecordZoneChange
+              .select(\.pendingRecordZoneChange)
+              .fetchAll(db)
+          }
+          #expect(pendingChanges == lateChanges)
+
+          syncEngine.stop()
+          try await syncEngine.start()
+          try await syncEngine.processPendingDatabaseChanges(scope: .private)
+          try await syncEngine.processPendingRecordZoneChanges(scope: .private)
+
+          assertInlineSnapshot(of: container, as: .customDump) {
+            """
+            MockCloudContainer(
+              privateCloudDatabase: MockCloudDatabase(
+                databaseScope: .private,
+                storage: []
+              ),
+              sharedCloudDatabase: MockCloudDatabase(
+                databaseScope: .shared,
+                storage: []
+              )
+            )
+            """
+          }
+        }
+
         // * Stop sync engine
         // * Edit list
         // * Start sync engine

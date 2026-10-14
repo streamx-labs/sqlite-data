@@ -661,9 +661,16 @@
       previousRecordTypeByTableName: [String: RecordType],
       currentRecordTypeByTableName: [String: RecordType]
     ) async throws {
-      try await enqueueLocallyPendingChanges()
+      let lastEnqueuedRowID = try await enqueueLocallyPendingChanges()
+      try await _didEnqueueLocallyPendingChanges?()
       try await userDatabase.write { db in
-        try PendingRecordZoneChange.delete().execute(db)
+        // NB: Rows written after the read get a larger rowid, so they stay pending.
+        if let lastEnqueuedRowID {
+          try PendingRecordZoneChange
+            .where { $0.rowid <= lastEnqueuedRowID }
+            .delete()
+            .execute(db)
+        }
 
         let newTableNames = currentRecordTypeByTableName.keys.filter { tableName in
           previousRecordTypeByTableName[tableName] == nil
@@ -677,13 +684,13 @@
       }
     }
 
-    private func enqueueLocallyPendingChanges() async throws {
-      let pendingRecordZoneChanges = try await metadatabase.read { db in
+    private func enqueueLocallyPendingChanges() async throws -> Int? {
+      let rows = try await metadatabase.read { db in
         try PendingRecordZoneChange
-          .select(\.pendingRecordZoneChange)
+          .select { ($0.rowid, $0.pendingRecordZoneChange) }
           .fetchAll(db)
       }
-      let changesByIsPrivate = Dictionary(grouping: pendingRecordZoneChanges) {
+      let changesByIsPrivate = Dictionary(grouping: rows.map(\.1)) {
         switch $0 {
         case .deleteRecord(let recordID), .saveRecord(let recordID):
           recordID.zoneID.ownerName == CKCurrentUserDefaultName
@@ -695,6 +702,7 @@
         $0.private?.state.add(pendingRecordZoneChanges: changesByIsPrivate[true] ?? [])
         $0.shared?.state.add(pendingRecordZoneChanges: changesByIsPrivate[false] ?? [])
       }
+      return rows.map(\.0).max()
     }
 
     private func enqueueUnknownRecordsForCloudKit() async throws {
@@ -2563,6 +2571,7 @@
   }
 
   @TaskLocal package var _isSynchronizingChanges = false
+  @TaskLocal package var _didEnqueueLocallyPendingChanges: (@Sendable () async throws -> Void)?
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   @TaskLocal package var _currentZoneID: CKRecordZone.ID?
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
