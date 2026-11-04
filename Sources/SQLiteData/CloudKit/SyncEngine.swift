@@ -462,6 +462,13 @@
       }
     }
 
+    /// StreamX fork: the record changes the private database's engine still has to send. While the
+    /// engine runs, an edit is queued here (`didUpdate`), not in the pending-changes table, and it
+    /// stays until CloudKit accepts it.
+    public var pendingPrivateRecordZoneChanges: [CKSyncEngine.PendingRecordZoneChange] {
+      syncEngines.withValue { $0.private?.state.pendingRecordZoneChanges ?? [] }
+    }
+
     private func start() throws -> Task<Void, Never> {
       guard !isRunning else { return Task {} }
       observationRegistrar.withMutation(of: self, keyPath: \.isRunning) {

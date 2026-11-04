@@ -28,6 +28,24 @@
         #expect(SendFilter.isConfirmedOnServer(ServerCopy(recordType: "remindersLists", recordID: sent.recordID)))
       }
 
+      /// An edit to a record already on the server waits in the engine's own queue, not in the
+      /// pending-changes table, until it is sent.
+      @Test func anEditToASyncedRecordIsPendingUntilSent() async throws {
+        try await userDatabase.userWrite { db in
+          try db.seed { RemindersList(id: 1, title: "Mine") }
+        }
+        try await syncEngine.processPendingRecordZoneChanges(scope: .private)
+        #expect(syncEngine.pendingPrivateRecordZoneChanges.isEmpty)
+
+        try await userDatabase.userWrite { db in
+          try RemindersList.find(1).update { $0.title = "Edited" }.execute(db)
+        }
+        #expect(syncEngine.pendingPrivateRecordZoneChanges == [.saveRecord(RemindersList.recordID(for: 1))])
+
+        try await syncEngine.processPendingRecordZoneChanges(scope: .private)
+        #expect(syncEngine.pendingPrivateRecordZoneChanges.isEmpty)
+      }
+
       @Test func refusedSaveIsNeverSent() async throws {
         syncEngine.setSendFilter(
           SendFilter(
