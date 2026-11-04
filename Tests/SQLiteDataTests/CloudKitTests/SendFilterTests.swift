@@ -10,6 +10,24 @@
     /// pending state; everything else is sent as before.
     @MainActor
     final class SendFilterTests: BaseCloudKitTests, @unchecked Sendable {
+      /// The cached record a save leaves before CloudKit answers has no change tag; a server copy does.
+      @Test func onlyARecordCloudKitReturnedIsOnTheServer() throws {
+        #expect(!SendFilter.isConfirmedOnServer(nil))
+
+        let sent = CKRecord(
+          recordType: "remindersLists",
+          recordID: CKRecord.ID(recordName: "1:remindersLists", zoneID: CKRecordZone.ID(zoneName: "zone"))
+        )
+        let archiver = NSKeyedArchiver(requiringSecureCoding: true)
+        sent.encodeSystemFields(with: archiver)
+        let unarchiver = try NSKeyedUnarchiver(forReadingFrom: archiver.encodedData)
+        unarchiver.requiresSecureCoding = true
+        let cached = try #require(CKRecord(coder: unarchiver))
+        #expect(!SendFilter.isConfirmedOnServer(cached))
+
+        #expect(SendFilter.isConfirmedOnServer(ServerCopy(recordType: "remindersLists", recordID: sent.recordID)))
+      }
+
       @Test func refusedSaveIsNeverSent() async throws {
         syncEngine.setSendFilter(
           SendFilter(
@@ -52,5 +70,10 @@
         )
       }
     }
+  }
+
+  /// A record as CloudKit returns it: with a change tag.
+  private final class ServerCopy: CKRecord, @unchecked Sendable {
+    override var recordChangeTag: String? { "server-tag" }
   }
 #endif

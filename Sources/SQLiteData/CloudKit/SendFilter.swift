@@ -9,7 +9,7 @@
   /// CloudKit. A change it refuses is removed from the engine's pending state and never sent.
   public struct SendFilter: Sendable {
     /// A save, after the record was built from its row. `isOnServer` is true when the record's
-    /// metadata holds a last known server record.
+    /// metadata holds a server record CloudKit returned (see `isConfirmedOnServer`).
     public var save: @Sendable (_ record: CKRecord, _ isOnServer: Bool) -> Bool
     /// A deletion, addressed to the zone the record was first published to.
     public var delete: @Sendable (_ recordID: CKRecord.ID) -> Bool
@@ -20,6 +20,16 @@
     ) {
       self.save = save
       self.delete = delete
+    }
+  }
+
+  extension SendFilter {
+    /// The last known server record is also written before CloudKit accepts a save
+    /// (`refreshLastKnownServerRecord`), so its presence alone isn't proof: only a record CloudKit
+    /// returned carries a change tag. Read from the metadata, not from the record being sent, which
+    /// is built fresh when older metadata kept no full copy.
+    public static func isConfirmedOnServer(_ lastKnownServerRecord: CKRecord?) -> Bool {
+      lastKnownServerRecord?.recordChangeTag != nil
     }
   }
 

@@ -1282,7 +1282,7 @@
           )
           // StreamX fork: a save the filter refuses leaves the pending state and is never sent.
           if let sendFilter = sendFilter.value, syncEngine.database.databaseScope == .private,
-            !sendFilter.save(record, metadata.lastKnownServerRecord != nil)
+            !sendFilter.save(record, SendFilter.isConfirmedOnServer(metadata.lastKnownServerRecord))
           {
             syncEngine.state.remove(pendingRecordZoneChanges: [.saveRecord(recordID)])
             return nil
