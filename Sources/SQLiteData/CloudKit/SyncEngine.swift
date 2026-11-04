@@ -44,6 +44,8 @@
     private let notificationsObserver = LockIsolated<(any NSObjectProtocol)?>(nil)
     private let activityCounts = LockIsolated(ActivityCounts())
     private let startTask = LockIsolated<Task<Void, Never>?>(nil)
+    /// StreamX fork: see `SendFilter`. Taken from `nextEngineSendFilter` when the engine is created.
+    let sendFilter = LockIsolated<SendFilter?>(nextEngineSendFilter.value)
     #if DEBUG && canImport(DeveloperToolsSupport)
       private let previewTimerTask = LockIsolated<Task<Void, Never>?>(nil)
     #endif
@@ -1278,6 +1280,13 @@
             with: T(queryOutput: row),
             userModificationTime: metadata.userModificationTime
           )
+          // StreamX fork: a save the filter refuses leaves the pending state and is never sent.
+          if let sendFilter = sendFilter.value, syncEngine.database.databaseScope == .private,
+            !sendFilter.save(record, metadata.lastKnownServerRecord != nil)
+          {
+            syncEngine.state.remove(pendingRecordZoneChanges: [.saveRecord(recordID)])
+            return nil
+          }
           await refreshLastKnownServerRecord(record)
           sentRecord = recordID
           return record
@@ -1294,6 +1303,30 @@
       var changes = syncEngine.state.pendingRecordZoneChanges.filter(options.scope.contains)
       guard !changes.isEmpty
       else { return [] }
+
+      // StreamX fork: deletions the filter refuses leave the pending state here, before the
+      // metadata cleanup below, so they are never sent nor evaluated again.
+      var refusedDeletions: [CKRecord.ID] = []
+      if let sendFilter = sendFilter.value, syncEngine.database.databaseScope == .private {
+        changes.removeAll { change in
+          guard case .deleteRecord(let recordID) = change, !sendFilter.delete(recordID)
+          else { return false }
+          refusedDeletions.append(recordID)
+          return true
+        }
+        if !refusedDeletions.isEmpty {
+          syncEngine.state.remove(pendingRecordZoneChanges: refusedDeletions.map { .deleteRecord($0) })
+          logger.debug("SQLiteData: send filter refused \(refusedDeletions.count) deletion(s)")
+          let refused = refusedDeletions
+          await withErrorReporting(.sqliteDataCloudKitFailure) {
+            try await userDatabase.write { db in
+              try SyncMetadata.findAll(refused).delete().execute(db)
+            }
+          }
+        }
+        guard !changes.isEmpty
+        else { return [] }
+      }
 
       let deletedRecordIDs: [CKRecord.ID] = changes.compactMap {
         switch $0 {
