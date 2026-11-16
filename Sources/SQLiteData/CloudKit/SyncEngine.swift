@@ -44,6 +44,10 @@
     private let notificationsObserver = LockIsolated<(any NSObjectProtocol)?>(nil)
     private let activityCounts = LockIsolated(ActivityCounts())
     private let startTask = LockIsolated<Task<Void, Never>?>(nil)
+    /// StreamX fork: see `SendFilter`. Taken from `nextEngineSendFilter` when the engine is created.
+    let sendFilter = LockIsolated<SendFilter?>(nextEngineSendFilter.value)
+    /// StreamX fork: see `ZoneGuard`. Taken from `nextEngineZoneGuard` when the engine is created.
+    let zoneGuard = LockIsolated<ZoneGuard?>(nextEngineZoneGuard.value)
     #if DEBUG && canImport(DeveloperToolsSupport)
       private let previewTimerTask = LockIsolated<Task<Void, Never>?>(nil)
     #endif
@@ -460,6 +464,13 @@
       }
     }
 
+    /// StreamX fork: the record changes the private database's engine still has to send. While the
+    /// engine runs, an edit is queued here (`didUpdate`), not in the pending-changes table, and it
+    /// stays until CloudKit accepts it.
+    public var pendingPrivateRecordZoneChanges: [CKSyncEngine.PendingRecordZoneChange] {
+      syncEngines.withValue { $0.private?.state.pendingRecordZoneChanges ?? [] }
+    }
+
     private func start() throws -> Task<Void, Never> {
       guard !isRunning else { return Task {} }
       observationRegistrar.withMutation(of: self, keyPath: \.isRunning) {
@@ -541,8 +552,15 @@
         await withErrorReporting(.sqliteDataCloudKitFailure) {
           guard try await container.accountStatus() == .available
           else { return }
+          // StreamX fork: a held zone is not recreated (`ZoneGuard`).
+          // A save queued before the hold (a saved state from an earlier launch) is dropped too:
+          // CKSyncEngine sends database changes itself, with no filter in front of them.
           syncEngines.withValue {
-            $0.private?.state.add(pendingDatabaseChanges: [.saveZone(defaultZone)])
+            if isHeld(defaultZone.zoneID) {
+              $0.private?.state.remove(pendingDatabaseChanges: [.saveZone(defaultZone)])
+            } else {
+              $0.private?.state.add(pendingDatabaseChanges: [.saveZone(defaultZone)])
+            }
           }
           try await uploadRecordsToCloudKit(
             previousRecordTypeByTableName: previousRecordTypeByTableName,
@@ -661,9 +679,15 @@
       previousRecordTypeByTableName: [String: RecordType],
       currentRecordTypeByTableName: [String: RecordType]
     ) async throws {
-      try await enqueueLocallyPendingChanges()
-      try await userDatabase.write { db in
+      // StreamX fork: read and delete the saved changes in one write, so one saved between the read
+      // and the delete is not lost.
+      let saved = try await userDatabase.write { db in
+        let saved = try PendingRecordZoneChange.select(\.pendingRecordZoneChange).fetchAll(db)
         try PendingRecordZoneChange.delete().execute(db)
+        return saved
+      }
+      enqueueLocallyPendingChanges(saved)
+      try await userDatabase.write { db in
 
         let newTableNames = currentRecordTypeByTableName.keys.filter { tableName in
           previousRecordTypeByTableName[tableName] == nil
@@ -677,12 +701,9 @@
       }
     }
 
-    private func enqueueLocallyPendingChanges() async throws {
-      let pendingRecordZoneChanges = try await metadatabase.read { db in
-        try PendingRecordZoneChange
-          .select(\.pendingRecordZoneChange)
-          .fetchAll(db)
-      }
+    private func enqueueLocallyPendingChanges(
+      _ pendingRecordZoneChanges: [CKSyncEngine.PendingRecordZoneChange]
+    ) {
       let changesByIsPrivate = Dictionary(grouping: pendingRecordZoneChanges) {
         switch $0 {
         case .deleteRecord(let recordID), .saveRecord(let recordID):
@@ -1102,6 +1123,10 @@
         }
 
       case .willSendChanges:
+        // StreamX fork: CKSyncEngine sends database changes itself, with no delegate filter; a held
+        // zone's queued save (queued before the hold, or before the hold's answer changed) is dropped
+        // here, on every engine, just before the send (`ZoneGuard`).
+        dropHeldZoneSaves(syncEngine: syncEngine)
         guard isCurrent(syncEngine) else { return }
         await MainActor.run {
           sendingChangesCount += 1
@@ -1278,6 +1303,13 @@
             with: T(queryOutput: row),
             userModificationTime: metadata.userModificationTime
           )
+          // StreamX fork: a save the filter refuses leaves the pending state and is never sent.
+          if let sendFilter = sendFilter.value, syncEngine.database.databaseScope == .private,
+            !sendFilter.save(record, SendFilter.isConfirmedOnServer(metadata.lastKnownServerRecord))
+          {
+            syncEngine.state.remove(pendingRecordZoneChanges: [.saveRecord(recordID)])
+            return nil
+          }
           await refreshLastKnownServerRecord(record)
           sentRecord = recordID
           return record
@@ -1292,8 +1324,41 @@
       syncEngine: any SyncEngineProtocol
     ) async -> [CKSyncEngine.PendingRecordZoneChange] {
       var changes = syncEngine.state.pendingRecordZoneChanges.filter(options.scope.contains)
+      // StreamX fork: a held zone's changes stay pending, unsent (`ZoneGuard`).
+      if zoneGuard.value != nil {
+        changes.removeAll { change in
+          switch change {
+          case .saveRecord(let recordID), .deleteRecord(let recordID): isHeld(recordID.zoneID)
+          @unknown default: false
+          }
+        }
+      }
       guard !changes.isEmpty
       else { return [] }
+
+      // StreamX fork: deletions the filter refuses leave the pending state here, before the
+      // metadata cleanup below, so they are never sent nor evaluated again.
+      var refusedDeletions: [CKRecord.ID] = []
+      if let sendFilter = sendFilter.value, syncEngine.database.databaseScope == .private {
+        changes.removeAll { change in
+          guard case .deleteRecord(let recordID) = change, !sendFilter.delete(recordID)
+          else { return false }
+          refusedDeletions.append(recordID)
+          return true
+        }
+        if !refusedDeletions.isEmpty {
+          syncEngine.state.remove(pendingRecordZoneChanges: refusedDeletions.map { .deleteRecord($0) })
+          logger.debug("SQLiteData: send filter refused \(refusedDeletions.count) deletion(s)")
+          let refused = refusedDeletions
+          await withErrorReporting(.sqliteDataCloudKitFailure) {
+            try await userDatabase.write { db in
+              try SyncMetadata.findAll(refused).delete().execute(db)
+            }
+          }
+        }
+        guard !changes.isEmpty
+        else { return [] }
+      }
 
       let deletedRecordIDs: [CKRecord.ID] = changes.compactMap {
         switch $0 {
@@ -1401,7 +1466,11 @@
 
       switch changeType {
       case .signIn:
-        syncEngine.state.add(pendingDatabaseChanges: [.saveZone(defaultZone)])
+        if isHeld(defaultZone.zoneID) {
+          syncEngine.state.remove(pendingDatabaseChanges: [.saveZone(defaultZone)])
+        } else {
+          syncEngine.state.add(pendingDatabaseChanges: [.saveZone(defaultZone)])
+        }
         await withErrorReporting {
           try await enqueueUnknownRecordsForCloudKit()
         }
@@ -1443,6 +1512,7 @@
       deletions: [(zoneID: CKRecordZone.ID, reason: CKDatabase.DatabaseChange.Deletion.Reason)],
       syncEngine: any SyncEngineProtocol
     ) async {
+      let scope = syncEngine.database.databaseScope
       let defaultZoneDeleted =
         await withErrorReporting(.sqliteDataCloudKitFailure) {
           try await userDatabase.write { db in
@@ -1450,6 +1520,14 @@
             for (zoneID, reason) in deletions {
               switch reason {
               case .deleted, .purged:
+                // StreamX fork: the app may keep the rows of a zone it did not delete (`ZoneGuard`).
+                let answer =
+                  self.zoneGuard.value?.zoneDeleted(zoneID, reason == .purged ? .purged : .deleted, scope)
+                  ?? .deleteLocal
+                guard answer == .deleteLocal else {
+                  logger.debug("SQLiteData: zone \(zoneID.zoneName) deleted, local rows kept")
+                  continue
+                }
                 try deleteRecords(in: zoneID, db: db)
                 if zoneID == self.defaultZone.zoneID {
                   defaultZoneDeleted = true
@@ -1464,9 +1542,11 @@
           }
         }
         ?? false
-      if defaultZoneDeleted {
+      if defaultZoneDeleted, !isHeld(defaultZone.zoneID) {
         syncEngine.state.add(pendingDatabaseChanges: [.saveZone(self.defaultZone)])
       }
+      // StreamX fork: any held zone, not only the default one, loses a save queued earlier.
+      dropHeldZoneSaves(syncEngine: syncEngine)
       @Sendable
       func deleteRecords(in zoneID: CKRecordZone.ID, db: Database) throws {
         let recordTypes = Dictionary(
@@ -1741,7 +1821,12 @@
 
         case .zoneNotFound:
           let zone = CKRecordZone(zoneID: failedRecord.recordID.zoneID)
-          newPendingDatabaseChanges.append(.saveZone(zone))
+          // StreamX fork: a held zone is not recreated; the save stays pending, unsent.
+          if isHeld(zone.zoneID) {
+            syncEngine.state.remove(pendingDatabaseChanges: [.saveZone(zone)])
+          } else {
+            newPendingDatabaseChanges.append(.saveZone(zone))
+          }
           newPendingRecordZoneChanges.append(.saveRecord(failedRecord.recordID))
           await clearServerRecord()
 

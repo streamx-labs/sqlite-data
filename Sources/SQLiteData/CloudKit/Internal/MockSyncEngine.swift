@@ -84,6 +84,9 @@
     }
 
     package func sendChanges(_ options: CKSyncEngine.SendChangesOptions) async throws {
+      // As CKSyncEngine's `willSendChanges` event, which this mock does not post (its context has no
+      // public initialiser): StreamX fork, `ZoneGuard`.
+      parentSyncEngine.dropHeldZoneSaves(syncEngine: self)
 
       if !parentSyncEngine.syncEngine(for: database.databaseScope).state.pendingDatabaseChanges
         .isEmpty
