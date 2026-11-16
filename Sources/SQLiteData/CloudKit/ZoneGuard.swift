@@ -1,0 +1,71 @@
+#if canImport(CloudKit)
+  public import CloudKit
+  import ConcurrencyExtras
+
+  /// Lets the app decide what happens to a zone the engine finds gone, and hold a zone it must not
+  /// recreate yet.
+  ///
+  /// StreamX fork: upstream deletes every local row of a zone fetched as deleted or purged, and saves
+  /// the default zone again on every start, on sign-in, after a deletion and when a send answers
+  /// `zoneNotFound`. When the zone was lost rather than deleted on purpose, that wipes the last copy of
+  /// the user's data and recreates an empty zone before anyone is asked. With a guard:
+  /// - a fetched deletion asks `zoneDeleted` whether to delete the zone's local rows (the default) or
+  ///   keep them;
+  /// - a zone `isHeld` answers true for is never saved by the engine, and its pending record changes
+  ///   stay pending (deletions included) without being sent, until the app lifts the hold.
+  public struct ZoneGuard: Sendable {
+    public enum DeletionAnswer: Sendable, Equatable {
+      /// Upstream behaviour: the zone's local rows are deleted.
+      case deleteLocal
+      /// The zone's local rows stay. The app is expected to hold the zone (`isHeld`) while it decides.
+      case keepLocal
+    }
+
+    /// Why the zone is gone, as CloudKit reports it (`.deleted` or `.purged`; an encrypted-data reset is
+    /// the engine's own and never asked about).
+    public enum DeletionReason: Sendable, Equatable {
+      case deleted
+      case purged
+    }
+
+    public var isHeld: @Sendable (_ zoneID: CKRecordZone.ID) -> Bool
+    public var zoneDeleted:
+      @Sendable (
+        _ zoneID: CKRecordZone.ID,
+        _ reason: DeletionReason,
+        _ scope: CKDatabase.Scope
+      ) -> DeletionAnswer
+
+    public init(
+      isHeld: @escaping @Sendable (_ zoneID: CKRecordZone.ID) -> Bool,
+      zoneDeleted: @escaping @Sendable (
+        _ zoneID: CKRecordZone.ID,
+        _ reason: DeletionReason,
+        _ scope: CKDatabase.Scope
+      ) -> DeletionAnswer
+    ) {
+      self.isHeld = isHeld
+      self.zoneDeleted = zoneDeleted
+    }
+  }
+
+  let nextEngineZoneGuard = LockIsolated<ZoneGuard?>(nil)
+
+  @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+  extension SyncEngine {
+    /// Sets the guard the next `SyncEngine` created takes for its whole life. Call it before creating
+    /// the engine: one created with `startImmediately` saves its zone at start.
+    public static func setNextEngineZoneGuard(_ zoneGuard: ZoneGuard?) {
+      nextEngineZoneGuard.setValue(zoneGuard)
+    }
+
+    /// Replaces this engine's guard (tests).
+    public func setZoneGuard(_ zoneGuard: ZoneGuard?) {
+      self.zoneGuard.setValue(zoneGuard)
+    }
+
+    func isHeld(_ zoneID: CKRecordZone.ID) -> Bool {
+      zoneGuard.value?.isHeld(zoneID) ?? false
+    }
+  }
+#endif
