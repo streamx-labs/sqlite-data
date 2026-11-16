@@ -553,8 +553,12 @@
           guard try await container.accountStatus() == .available
           else { return }
           // StreamX fork: a held zone is not recreated (`ZoneGuard`).
-          if !isHeld(defaultZone.zoneID) {
-            syncEngines.withValue {
+          // A save queued before the hold (a saved state from an earlier launch) is dropped too:
+          // CKSyncEngine sends database changes itself, with no filter in front of them.
+          syncEngines.withValue {
+            if isHeld(defaultZone.zoneID) {
+              $0.private?.state.remove(pendingDatabaseChanges: [.saveZone(defaultZone)])
+            } else {
               $0.private?.state.add(pendingDatabaseChanges: [.saveZone(defaultZone)])
             }
           }
@@ -1458,7 +1462,9 @@
 
       switch changeType {
       case .signIn:
-        if !isHeld(defaultZone.zoneID) {
+        if isHeld(defaultZone.zoneID) {
+          syncEngine.state.remove(pendingDatabaseChanges: [.saveZone(defaultZone)])
+        } else {
           syncEngine.state.add(pendingDatabaseChanges: [.saveZone(defaultZone)])
         }
         await withErrorReporting {
@@ -1532,7 +1538,9 @@
           }
         }
         ?? false
-      if defaultZoneDeleted, !isHeld(defaultZone.zoneID) {
+      if isHeld(defaultZone.zoneID) {
+        syncEngine.state.remove(pendingDatabaseChanges: [.saveZone(self.defaultZone)])
+      } else if defaultZoneDeleted {
         syncEngine.state.add(pendingDatabaseChanges: [.saveZone(self.defaultZone)])
       }
       @Sendable
@@ -1810,7 +1818,9 @@
         case .zoneNotFound:
           let zone = CKRecordZone(zoneID: failedRecord.recordID.zoneID)
           // StreamX fork: a held zone is not recreated; the save stays pending, unsent.
-          if !isHeld(zone.zoneID) {
+          if isHeld(zone.zoneID) {
+            syncEngine.state.remove(pendingDatabaseChanges: [.saveZone(zone)])
+          } else {
             newPendingDatabaseChanges.append(.saveZone(zone))
           }
           newPendingRecordZoneChanges.append(.saveRecord(failedRecord.recordID))

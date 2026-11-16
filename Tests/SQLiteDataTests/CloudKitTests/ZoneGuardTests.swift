@@ -99,6 +99,23 @@
         #expect((try? syncEngine.private.database.record(for: RemindersList.recordID(for: 2))) == nil)
       }
 
+      /// A zone save queued before the hold (CKSyncEngine sends database changes itself) is dropped.
+      @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+      @Test func aSaveQueuedBeforeTheHoldIsDropped() async throws {
+        syncEngine.private.state.add(pendingDatabaseChanges: [.saveZone(syncEngine.defaultZone)])
+        syncEngine.setZoneGuard(held(LockIsolated([syncEngine.defaultZone.zoneID.zoneName]), keep: true))
+
+        await syncEngine.handleEvent(
+          SyncEngine.Event.fetchedDatabaseChanges(
+            modifications: [],
+            deletions: [(syncEngine.defaultZone.zoneID, .deleted)]
+          ),
+          syncEngine: syncEngine.private
+        )
+
+        #expect(!savesDefaultZone)
+      }
+
       @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
       @Test func signingInDoesNotRecreateAHeldZone() async throws {
         syncEngine.setZoneGuard(held(LockIsolated([syncEngine.defaultZone.zoneID.zoneName]), keep: true))
