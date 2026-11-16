@@ -68,6 +68,17 @@
       zoneGuard.value?.isHeld(zoneID) ?? false
     }
 
+    /// Removes the queued save of every zone held now, on both engines. The app calls it when a hold
+    /// starts, so a save queued earlier is gone whatever order CKSyncEngine reads its pending changes in
+    /// around `willSendChanges`.
+    public func dropHeldZoneSaves() {
+      guard syncEngines.withValue(\.isRunning) else { return }
+      let engines = syncEngines.withValue { [$0.private, $0.shared] }
+      for engine in engines {
+        if let engine { dropHeldZoneSaves(syncEngine: engine) }
+      }
+    }
+
     /// Removes the queued save of every zone held now. Run just before a send and after a fetched
     /// deletion: a hold can start after its zone's save was queued.
     package func dropHeldZoneSaves(syncEngine: any SyncEngineProtocol) {

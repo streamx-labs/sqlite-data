@@ -156,6 +156,18 @@
         #expect(!zoneExists(syncEngine.defaultZone.zoneID))
       }
 
+      /// The app drops the saves itself when a hold starts, without waiting for a send.
+      @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+      @Test func droppingWhenAHoldStartsRemovesTheQueuedSave() async throws {
+        syncEngine.private.state.removePendingChanges()
+        syncEngine.private.state.add(pendingDatabaseChanges: [.saveZone(syncEngine.defaultZone)])
+        syncEngine.setZoneGuard(held(LockIsolated([syncEngine.defaultZone.zoneID.zoneName]), keep: true))
+
+        syncEngine.dropHeldZoneSaves()
+
+        #expect(!savesDefaultZone)
+      }
+
       @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
       @Test func signingInDoesNotRecreateAHeldZone() async throws {
         syncEngine.setZoneGuard(held(LockIsolated([syncEngine.defaultZone.zoneID.zoneName]), keep: true))
