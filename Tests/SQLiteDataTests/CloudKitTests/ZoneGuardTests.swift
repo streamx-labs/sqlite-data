@@ -16,6 +16,10 @@
         )
       }
 
+      private func zoneExists(_ zoneID: CKRecordZone.ID) -> Bool {
+        syncEngine.private.database.state.withValue { $0.storage[zoneID] != nil }
+      }
+
       private var savesDefaultZone: Bool {
         syncEngine.private.state.pendingDatabaseChanges.contains(.saveZone(syncEngine.defaultZone))
       }
@@ -114,6 +118,42 @@
         )
 
         #expect(!savesDefaultZone)
+      }
+
+      /// A held zone other than the default one: its queued save is dropped after the deletion, so the
+      /// next send does not recreate it.
+      @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+      @Test func aQueuedSaveOfAnotherHeldZoneIsNotSent() async throws {
+        let other = CKRecordZone(zoneID: CKRecordZone.ID(zoneName: "other", ownerName: CKCurrentUserDefaultName))
+        syncEngine.private.state.removePendingChanges()
+        syncEngine.private.state.add(pendingDatabaseChanges: [.saveZone(other)])
+        syncEngine.setZoneGuard(held(LockIsolated(["other"]), keep: true))
+
+        await syncEngine.handleEvent(
+          SyncEngine.Event.fetchedDatabaseChanges(modifications: [], deletions: [(other.zoneID, .deleted)]),
+          syncEngine: syncEngine.private
+        )
+        try await syncEngine.private.sendChanges(CKSyncEngine.SendChangesOptions())
+
+        #expect(syncEngine.private.state.pendingDatabaseChanges.isEmpty)
+        #expect(!zoneExists(other.zoneID))
+      }
+
+      /// The hold starts after the default zone's save was queued, with no deletion or sign-in between:
+      /// the send drops the save instead of recreating the zone.
+      @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+      @Test func aHoldStartingAfterTheSaveWasQueuedStopsTheSend() async throws {
+        syncEngine.private.state.removePendingChanges()
+        _ = try syncEngine.private.database.modifyRecordZones(deleting: [syncEngine.defaultZone.zoneID])
+        syncEngine.private.state.add(pendingDatabaseChanges: [.saveZone(syncEngine.defaultZone)])
+        let zones = LockIsolated<Set<String>>([])
+        syncEngine.setZoneGuard(held(zones, keep: true))
+        zones.withValue { $0.insert(syncEngine.defaultZone.zoneID.zoneName) }
+
+        try await syncEngine.private.sendChanges(CKSyncEngine.SendChangesOptions())
+
+        #expect(!savesDefaultZone)
+        #expect(!zoneExists(syncEngine.defaultZone.zoneID))
       }
 
       @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)

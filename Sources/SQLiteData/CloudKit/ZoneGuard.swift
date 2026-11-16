@@ -67,5 +67,20 @@
     func isHeld(_ zoneID: CKRecordZone.ID) -> Bool {
       zoneGuard.value?.isHeld(zoneID) ?? false
     }
+
+    /// Removes the queued save of every zone held now. Run just before a send and after a fetched
+    /// deletion: a hold can start after its zone's save was queued.
+    package func dropHeldZoneSaves(syncEngine: any SyncEngineProtocol) {
+      guard zoneGuard.value != nil else { return }
+      let heldSaves = syncEngine.state.pendingDatabaseChanges.filter { change in
+        switch change {
+        case .saveZone(let zone): isHeld(zone.zoneID)
+        case .deleteZone: false
+        @unknown default: false
+        }
+      }
+      guard !heldSaves.isEmpty else { return }
+      syncEngine.state.remove(pendingDatabaseChanges: heldSaves)
+    }
   }
 #endif

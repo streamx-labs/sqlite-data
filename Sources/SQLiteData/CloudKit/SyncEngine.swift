@@ -1123,6 +1123,10 @@
         }
 
       case .willSendChanges:
+        // StreamX fork: CKSyncEngine sends database changes itself, with no delegate filter; a held
+        // zone's queued save (queued before the hold, or before the hold's answer changed) is dropped
+        // here, on every engine, just before the send (`ZoneGuard`).
+        dropHeldZoneSaves(syncEngine: syncEngine)
         guard isCurrent(syncEngine) else { return }
         await MainActor.run {
           sendingChangesCount += 1
@@ -1538,11 +1542,11 @@
           }
         }
         ?? false
-      if isHeld(defaultZone.zoneID) {
-        syncEngine.state.remove(pendingDatabaseChanges: [.saveZone(self.defaultZone)])
-      } else if defaultZoneDeleted {
+      if defaultZoneDeleted, !isHeld(defaultZone.zoneID) {
         syncEngine.state.add(pendingDatabaseChanges: [.saveZone(self.defaultZone)])
       }
+      // StreamX fork: any held zone, not only the default one, loses a save queued earlier.
+      dropHeldZoneSaves(syncEngine: syncEngine)
       @Sendable
       func deleteRecords(in zoneID: CKRecordZone.ID, db: Database) throws {
         let recordTypes = Dictionary(
